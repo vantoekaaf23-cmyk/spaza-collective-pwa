@@ -18,17 +18,18 @@
     <!-- 2. THE NETWORK (Firebase Module Loader) -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         window.FB = {
-            initializeApp, getAuth, signInAnonymously, onAuthStateChanged,
-            getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, deleteDoc, doc
+            initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
+            getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc
         };
     </script>
 
     <!-- 3. THE CAMOUFLAGE (PWA Manifest Injection) -->
     <script>
+        // PWA Manifest setup for better mobile experience
         const manifest = {
             "name": "The New Collective",
             "short_name": "Collective",
@@ -46,10 +47,18 @@
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
-        body { font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; }
-        .glass-panel { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); }
+        body { 
+            font-family: 'Inter', sans-serif; 
+            -webkit-tap-highlight-color: transparent; 
+            /* Ensures smooth background color transition */
+            background-color: #0f172a;
+        }
         .dark-glass { background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(10px); }
-        .animate-pulse-fast { animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        .animate-fade-in { animation: fadeIn 0.5s ease-out; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
     </style>
 </head>
 <body class="bg-slate-900 text-slate-100 min-h-screen pb-safe">
@@ -60,14 +69,14 @@
     <!-- THE LOGIC -->
     <script type="text/babel">
         // --- CONFIGURATION ---
-        // REPLACE THIS WITH YOUR FIREBASE CONFIG FROM THE CONSOLE IF NEEDED
         const DEFAULT_CONFIG = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const INITIAL_AUTH_TOKEN = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         
-        const LOGISTICS_SURCHARGE = 150.00;
+        const LOGISTICS_SURCHARGE = 150.00; // Fixed delivery fee (ZAR)
         const ZONES = ['Diepkloof', 'Orlando', 'Pimville', 'Dobsonville', 'Meadowlands', 'Zola'];
         
-        // THE BLACK BOX DATA (LBC LOCKED)
+        // THE BLACK BOX DATA (Local Buying Collective Targets)
         const TARGETS = {
             'Ace Maize Meal (10kg)': { target: 150, unit: 'bags', base_price: 90.00, factory_discount: 0.25, user_discount: 0.125 },
             'Tastic Rice (10kg Bag)': { target: 60, unit: 'bags', base_price: 256.00, factory_discount: 0.30, user_discount: 0.15 },
@@ -78,13 +87,12 @@
             'Terminate Bleach (5x750ml)': { target: 50, unit: 'units', base_price: 76.00, factory_discount: 0.20, user_discount: 0.10 }
         };
 
-        const { useState, useEffect, useMemo } = React;
-        const { Users, Trophy, TrendingUp, ShoppingCart, Package, Truck, AlertTriangle, Loader2, CheckCircle, MapPin, DollarSign, Trash2, Shield } = lucide;
+        const { useState, useEffect, useMemo, useCallback } = React;
+        const { Users, Trophy, TrendingUp, ShoppingCart, Package, Truck, AlertTriangle, Loader2, CheckCircle, MapPin, DollarSign, Trash2, Shield, X, Info } = lucide;
 
         // --- MAIN COMPONENT ---
         const App = () => {
-            const [system, setSystem] = useState({ status: 'booting', error: null });
-            const [user, setUser] = useState(null);
+            const [system, setSystem] = useState({ status: 'booting', error: null, db: null, auth: null, userId: null });
             const [orders, setOrders] = useState([]);
             
             // UX State
@@ -100,7 +108,7 @@
                 qty: ''
             });
 
-            // --- BOOT STRATEGY ---
+            // --- BOOT STRATEGY (Firebase Init and Auth) ---
             useEffect(() => {
                 const init = async () => {
                     let attempts = 0;
@@ -110,67 +118,89 @@
                     }
                     
                     if (!window.FB) {
-                        setSystem({ status: 'error', error: 'Network Protocol Failed. Refresh.' });
+                        setSystem(p => ({ ...p, status: 'error', error: 'Network Protocol Failed. Refresh.' }));
                         return;
                     }
 
                     try {
                         const FB = window.FB;
-                        // Robust Config Handling
-                        let config = DEFAULT_CONFIG;
-                        if (Object.keys(config).length === 0) {
-                            // Fallback for GitHub Pages (You must fill this in later via Secrets or manual edit if needed)
-                            console.warn("No Firebase Config Found. App will stall.");
-                        }
-
-                        const app = FB.initializeApp(config);
+                        
+                        const app = FB.initializeApp(DEFAULT_CONFIG);
                         const auth = FB.getAuth(app);
                         const db = FB.getFirestore(app);
+                        
+                        // Set up authentication using the provided token or anonymous sign-in
+                        if (INITIAL_AUTH_TOKEN) {
+                            await FB.signInWithCustomToken(auth, INITIAL_AUTH_TOKEN);
+                        } else {
+                            await FB.signInAnonymously(auth);
+                        }
 
-                        // Silent Auth
-                        await FB.signInAnonymously(auth);
-
+                        // Listen for auth state changes
                         FB.onAuthStateChanged(auth, (u) => {
                             if (u) {
-                                setUser(u);
-                                setSystem({ status: 'ready' });
-                                
-                                // Real-time Link
-                                const q = FB.query(
-                                    FB.collection(db, 'artifacts', APP_ID, 'public', 'data', 'collective_orders'), 
-                                    FB.orderBy('createdAt', 'desc')
-                                );
-                                
-                                FB.onSnapshot(q, snap => {
-                                    setOrders(snap.docs.map(d => ({id: d.id, ...d.data()})));
-                                });
+                                setSystem(p => ({ 
+                                    ...p, 
+                                    status: 'auth_ready', 
+                                    db: db, 
+                                    auth: auth, 
+                                    userId: u.uid 
+                                }));
+                            } else {
+                                setSystem(p => ({ ...p, status: 'auth_ready', db: db, auth: auth, userId: null }));
                             }
                         });
                     } catch (e) {
-                        console.error(e);
-                        setSystem({ status: 'error', error: 'Security Handshake Failed.' });
+                        console.error("Firebase Init Error:", e);
+                        setSystem(p => ({ ...p, status: 'error', error: 'Security Handshake Failed.' }));
                     }
                 };
                 init();
-            }, []);
+            }, []); // Run only once on mount
 
-            // --- THE BLACK BOX LOGIC ---
+            // --- Firestore Listener ---
+            useEffect(() => {
+                if (system.status !== 'auth_ready' || !system.db) return;
+
+                // Path for Public Data: /artifacts/{appId}/public/data/collective_orders
+                const collectionRef = system.db.collection(system.db, 'artifacts', APP_ID, 'public', 'data', 'collective_orders');
+                const q = system.db.query(collectionRef, system.db.orderBy('createdAt', 'desc'));
+                
+                // Real-time Listener (onSnapshot)
+                const unsubscribe = system.db.onSnapshot(q, snap => {
+                    setOrders(snap.docs.map(d => ({id: d.id, ...d.data()})));
+                    // Once data is loaded and listener is set, the system is fully ready
+                    setSystem(p => ({ ...p, status: 'ready' })); 
+                }, (error) => {
+                    console.error("Firestore Error:", error);
+                    setSystem(p => ({ ...p, status: 'error', error: 'Data synchronization failed.' }));
+                });
+
+                // Cleanup function
+                return () => unsubscribe();
+            }, [system.status, system.db, system.userId]); // Re-run when auth state changes
+
+            // --- THE BLACK BOX LOGIC (Financial Calculations) ---
             const metrics = useMemo(() => {
                 const item = TARGETS[form.item];
                 const qty = parseInt(form.qty) || 0;
                 
+                if (qty <= 0 || !item) {
+                    return { gross: 0, savings: 0, net: 0, final: 0, revenue: 0, valid: false };
+                }
+
                 const gross = item.base_price * qty;
                 const savings = gross * item.user_discount;
                 const net = gross - savings;
                 const final = net + LOGISTICS_SURCHARGE;
                 
-                // THE HIDDEN PROFIT
-                const revenue = (gross * item.factory_discount) - savings;
+                // The collective's revenue (hidden from user, for tracking collective health)
+                const revenue = (gross * item.factory_discount) - savings; 
 
-                return { gross, savings, net, final, revenue, valid: qty > 0 };
+                return { gross, savings, net, final, revenue, valid: true };
             }, [form.item, form.qty]);
 
-            // --- AGGREGATION ENGINE ---
+            // --- AGGREGATION ENGINE (Stats and Leaderboard) ---
             const stats = useMemo(() => {
                 const data = JSON.parse(JSON.stringify(TARGETS));
                 Object.keys(data).forEach(k => data[k].current = 0);
@@ -193,15 +223,15 @@
             // --- ACTION HANDLERS ---
             const commit = async (e) => {
                 e.preventDefault();
-                if (!metrics.valid || !form.shopName) return;
+                if (!metrics.valid || !form.shopName || !system.db || !system.userId) return;
                 setLoading(true);
                 
                 try {
                     const FB = window.FB;
-                    const db = FB.getFirestore();
+                    const db = system.db;
                     
                     await FB.addDoc(FB.collection(db, 'artifacts', APP_ID, 'public', 'data', 'collective_orders'), {
-                        userId: user.uid,
+                        userId: system.userId,
                         shopName: form.shopName,
                         zone: form.zone,
                         item: form.item,
@@ -210,26 +240,45 @@
                         value_gross: metrics.gross,
                         value_savings: metrics.savings,
                         value_net: metrics.net,
-                        value_revenue: metrics.revenue, // HIDDEN
+                        value_revenue: metrics.revenue,
                         value_final: metrics.final,
                         createdAt: FB.serverTimestamp()
                     });
                     
                     setForm(p => ({ ...p, qty: '' }));
                 } catch (err) {
-                    alert("Commitment Error: " + err.message);
+                    console.error("Commitment Error:", err);
+                    // Use the custom modal instead of alert()
+                    setShowModal({ 
+                        title: "Commitment Error", 
+                        message: "Failed to place order: " + err.message,
+                        isError: true
+                    });
                 }
                 setLoading(false);
             };
 
             // --- FORMATTING ---
             const money = (n) => new Intl.NumberFormat('en-ZA', {style: 'currency', currency: 'ZAR'}).format(n);
+            const timeAgo = (timestamp) => {
+                if (!timestamp) return '...';
+                const now = Date.now();
+                const past = timestamp.seconds * 1000;
+                const diffSeconds = Math.floor((now - past) / 1000);
+                
+                if (diffSeconds < 60) return `${diffSeconds}s ago`;
+                if (diffSeconds < 3600) return `${Math.floor(diffSeconds / 60)}m ago`;
+                if (diffSeconds < 86400) return `${Math.floor(diffSeconds / 3600)}h ago`;
+                return new Date(past).toLocaleDateString();
+            };
 
             // --- RENDERER ---
-            if (system.status === 'booting') return (
+            if (system.status === 'booting' || system.status === 'auth_ready') return (
                 <div className="fixed inset-0 flex flex-col items-center justify-center bg-slate-900 text-emerald-500">
                     <Loader2 className="w-16 h-16 animate-spin mb-4" />
-                    <div className="font-mono text-xs tracking-widest uppercase">Establishing Secure Link...</div>
+                    <div className="font-mono text-xs tracking-widest uppercase">
+                        {system.status === 'booting' ? 'Establishing Secure Link...' : 'Authenticating User...'}
+                    </div>
                 </div>
             );
 
@@ -254,28 +303,29 @@
                             </h1>
                             <p className="text-[10px] text-slate-400 font-mono uppercase tracking-widest">Supply Network V3.0</p>
                         </div>
-                        <div className="bg-emerald-500/10 border border-emerald-500/20 rounded px-2 py-1 text-right">
-                            <div className="text-[10px] text-emerald-400 font-bold flex items-center gap-1">
-                                <Shield size={10} /> SECURE
+                        <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-2 text-right">
+                            <div className="text-[10px] text-slate-400 font-mono flex items-center gap-1">
+                                <Shield size={10} className="text-blue-400" /> 
+                                ID: {system.userId?.substring(0, 4)}...
                             </div>
                         </div>
                     </div>
 
                     <div className="p-4 space-y-6">
                         
-                        {/* ZONE WARFARE */}
+                        {/* ZONE WARFARE / LEADERBOARD */}
                         <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700">
                             <div className="flex items-center justify-between mb-3">
                                 <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                                    <Trophy size={14} className="text-amber-400"/> Zone Power
+                                    <Trophy size={14} className="text-amber-400"/> Zone Power (Units Committed)
                                 </h2>
                             </div>
                             <div className="flex gap-3 overflow-x-auto pb-2">
                                 {leaderboard.map(([zone, score], i) => (
-                                    <div key={zone} className="flex-shrink-0 bg-slate-800 p-3 rounded-lg border border-slate-700 min-w-[100px] text-center">
-                                        <div className="text-[10px] text-slate-500 font-mono">RANK #{i+1}</div>
-                                        <div className="font-bold text-white truncate">{zone}</div>
-                                        <div className="text-xs text-emerald-400 font-mono">{score} UNITS</div>
+                                    <div key={zone} className={`flex-shrink-0 p-3 rounded-lg border min-w-[100px] text-center transition-all ${i === 0 ? 'bg-amber-400/10 border-amber-400 text-amber-300' : 'bg-slate-800 border-slate-700 text-slate-100'}`}>
+                                        <div className="text-[10px] font-mono tracking-widest">{i === 0 ? 'CHAMPION' : `RANK #${i+1}`}</div>
+                                        <div className="font-bold truncate text-lg">{zone}</div>
+                                        <div className="text-xs font-mono">{score} UNITS</div>
                                     </div>
                                 ))}
                             </div>
@@ -283,11 +333,11 @@
 
                         {/* TABS */}
                         <div className="grid grid-cols-2 gap-1 bg-slate-800 p-1 rounded-lg">
-                            <button onClick={() => setTab('commit')} className={`py-2.5 text-sm font-bold rounded-md transition-all ${tab === 'commit' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}>
-                                Commit Order
+                            <button onClick={() => setTab('commit')} className={`py-2.5 text-sm font-bold rounded-lg transition-all ${tab === 'commit' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-white'}`}>
+                                <div className="flex items-center justify-center gap-2"><ShoppingCart size={16}/> Commit Order</div>
                             </button>
-                            <button onClick={() => setTab('ledger')} className={`py-2.5 text-sm font-bold rounded-md transition-all ${tab === 'ledger' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}>
-                                Live Ledger
+                            <button onClick={() => setTab('ledger')} className={`py-2.5 text-sm font-bold rounded-lg transition-all ${tab === 'ledger' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-white'}`}>
+                                <div className="flex items-center justify-center gap-2"><TrendingUp size={16}/> Live Ledger</div>
                             </button>
                         </div>
 
@@ -296,16 +346,20 @@
                             <div className="space-y-6 animate-fade-in">
                                 <!-- TARGETS DASHBOARD -->
                                 <div className="space-y-3">
+                                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><Trophy size={14} className="text-blue-400"/> Collective Targets</h3>
                                     {stats.map(s => (
                                         <div key={s.name} className="bg-slate-800 p-3 rounded-lg border border-slate-700 relative overflow-hidden">
                                             <div className="flex justify-between text-sm relative z-10">
                                                 <span className="font-medium text-slate-200">{s.name}</span>
                                                 <span className={s.unlocked ? "text-emerald-400 font-bold" : "text-slate-500 font-mono"}>
-                                                    {s.current}/{s.target}
+                                                    {s.current}/{s.target} {s.unit}
                                                 </span>
                                             </div>
-                                            <div className="h-1 bg-slate-700 mt-2 rounded-full overflow-hidden relative z-10">
-                                                <div className={`h-full transition-all duration-1000 ${s.unlocked ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{width: `${s.pct}%`}}></div>
+                                            <div className="text-xs text-slate-500 mt-0.5">
+                                                Savings: **{money(s.base_price * s.user_discount)}** per {s.unit}
+                                            </div>
+                                            <div className="h-2 bg-slate-700 mt-2 rounded-full overflow-hidden relative z-10">
+                                                <div className={`h-full transition-all duration-1000 rounded-full ${s.unlocked ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{width: `${s.pct}%`}}></div>
                                             </div>
                                             {s.unlocked && <div className="absolute right-2 top-2 opacity-10 rotate-12"><CheckCircle size={64} /></div>}
                                         </div>
@@ -313,83 +367,84 @@
                                 </div>
 
                                 <!-- ORDER FORM -->
-                                <form onSubmit={commit} className="bg-white rounded-xl p-5 text-slate-900 shadow-xl">
+                                <form onSubmit={commit} className="bg-slate-800 rounded-xl p-5 text-slate-100 shadow-xl border border-slate-700">
+                                    <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">Place Order</h3>
                                     <div className="space-y-4">
                                         <div>
-                                            <label className="text-xs font-bold text-slate-500 uppercase">Shop Name</label>
+                                            <label className="text-xs font-bold text-slate-400 uppercase">Shop Name</label>
                                             <input 
                                                 value={form.shopName} 
                                                 onChange={e => setForm({...form, shopName: e.target.value})}
-                                                className="w-full p-3 bg-slate-100 border-0 rounded-lg font-semibold focus:ring-2 ring-emerald-500 outline-none" 
-                                                placeholder="e.g. Mama's Store"
+                                                className="w-full p-3 bg-slate-700 border border-slate-600 rounded-lg font-semibold focus:ring-2 ring-emerald-500 outline-none placeholder-slate-500" 
+                                                placeholder="e.g. Mama Zama's Spaza"
                                                 required
                                             />
                                         </div>
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-400 uppercase">Item</label>
+                                            <select 
+                                                value={form.item}
+                                                onChange={e => setForm({...form, item: e.target.value})}
+                                                className="w-full p-3 bg-slate-700 border border-slate-600 rounded-lg font-semibold outline-none"
+                                            >
+                                                {Object.keys(TARGETS).map(t => <option key={t} value={t}>{t}</option>)}
+                                            </select>
+                                        </div>
                                         <div className="grid grid-cols-2 gap-3">
                                             <div>
-                                                <label className="text-xs font-bold text-slate-500 uppercase">Zone</label>
+                                                <label className="text-xs font-bold text-slate-400 uppercase">Delivery Zone</label>
                                                 <select 
                                                     value={form.zone}
                                                     onChange={e => setForm({...form, zone: e.target.value})}
-                                                    className="w-full p-3 bg-slate-100 border-0 rounded-lg font-semibold outline-none"
+                                                    className="w-full p-3 bg-slate-700 border border-slate-600 rounded-lg font-semibold outline-none"
                                                 >
                                                     {ZONES.map(z => <option key={z} value={z}>{z}</option>)}
                                                 </select>
                                             </div>
                                             <div>
-                                                <label className="text-xs font-bold text-slate-500 uppercase">Quantity</label>
+                                                <label className="text-xs font-bold text-slate-400 uppercase">Quantity (Units)</label>
                                                 <input 
                                                     type="number" 
                                                     value={form.qty}
                                                     onChange={e => setForm({...form, qty: e.target.value})}
-                                                    className="w-full p-3 bg-slate-100 border-0 rounded-lg font-semibold focus:ring-2 ring-emerald-500 outline-none" 
-                                                    placeholder="0"
+                                                    className="w-full p-3 bg-slate-700 border border-slate-600 rounded-lg font-semibold focus:ring-2 ring-emerald-500 outline-none placeholder-slate-500" 
+                                                    placeholder="1"
                                                     min="1"
                                                     required
                                                 />
                                             </div>
                                         </div>
-                                        <div>
-                                            <label className="text-xs font-bold text-slate-500 uppercase">Item</label>
-                                            <select 
-                                                value={form.item}
-                                                onChange={e => setForm({...form, item: e.target.value})}
-                                                className="w-full p-3 bg-slate-100 border-0 rounded-lg font-semibold outline-none"
-                                            >
-                                                {Object.keys(TARGETS).map(t => <option key={t} value={t}>{t}</option>)}
-                                            </select>
-                                        </div>
                                     </div>
 
                                     {/* THE BREAKDOWN */}
                                     {metrics.valid && (
-                                        <div className="mt-6 bg-slate-50 rounded-lg p-4 border border-slate-200">
-                                            <div className="flex justify-between text-slate-500 text-sm mb-1">
-                                                <span>Wholesale Value</span>
+                                        <div className="mt-6 bg-slate-700 rounded-xl p-4 border border-slate-600">
+                                            <div className="flex justify-between text-slate-400 text-sm mb-1">
+                                                <span>Wholesale Value ({metrics.valid ? TARGETS[form.item].base_price : 0}/unit)</span>
                                                 <span>{money(metrics.gross)}</span>
                                             </div>
-                                            <div className="flex justify-between text-emerald-600 text-sm font-bold mb-2">
-                                                <span>Collective Savings</span>
+                                            <div className="flex justify-between text-emerald-400 text-sm font-bold mb-2">
+                                                <span>Collective Savings (Discount)</span>
                                                 <span>-{money(metrics.savings)}</span>
                                             </div>
-                                            <div className="border-t border-slate-200 my-2"></div>
-                                            <div className="flex justify-between text-blue-600 text-sm font-medium">
+                                            <div className="flex justify-between text-blue-400 text-sm font-medium pt-2 border-t border-slate-600">
                                                 <span className="flex items-center gap-1"><Truck size={12}/> Logistics Fee</span>
-                                                <span>{money(LOGISTICS_SURCHARGE)}</span>
+                                                <span>+{money(LOGISTICS_SURCHARGE)}</span>
                                             </div>
-                                            <div className="flex justify-between text-slate-900 text-xl font-black mt-2 pt-2 border-t border-slate-300">
-                                                <span>TOTAL</span>
-                                                <span>{money(metrics.final)}</span>
+                                            <div className="flex justify-between text-white text-2xl font-black mt-3 pt-3 border-t border-slate-600">
+                                                <span>TOTAL DUE</span>
+                                                <span className="text-emerald-400">{money(metrics.final)}</span>
                                             </div>
                                         </div>
                                     )}
 
                                     <button 
+                                        type="submit"
                                         disabled={loading || !metrics.valid}
-                                        className="w-full mt-4 bg-emerald-600 hover:bg-emerald-500 text-white py-4 rounded-xl font-bold shadow-lg shadow-emerald-500/30 active:scale-[0.98] transition-all disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-2"
+                                        className="w-full mt-6 bg-emerald-600 hover:bg-emerald-500 text-white py-4 rounded-xl font-bold shadow-lg shadow-emerald-500/30 active:scale-[0.98] transition-all disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-2"
                                     >
                                         {loading ? <Loader2 className="animate-spin"/> : <ShoppingCart size={20} />}
-                                        {loading ? 'Committing...' : 'COMMIT ORDER'}
+                                        {loading ? 'COMMITTING...' : 'CONFIRM AND COMMIT ORDER'}
                                     </button>
                                 </form>
                             </div>
@@ -398,22 +453,25 @@
                         {/* LEDGER VIEW */}
                         {tab === 'ledger' && (
                             <div className="space-y-3 animate-fade-in">
+                                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><Package size={14} className="text-emerald-400"/> Last 10 Orders</h3>
                                 {orders.length === 0 ? (
-                                    <div className="text-center py-12 opacity-30">
+                                    <div className="text-center py-12 opacity-30 bg-slate-800 rounded-xl border border-slate-700">
                                         <Package size={48} className="mx-auto mb-2"/>
-                                        <p>Ledger Empty</p>
+                                        <p className="text-sm">No orders committed yet.</p>
                                     </div>
                                 ) : (
-                                    orders.map(o => (
-                                        <div key={o.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
-                                            <div>
-                                                <div className="font-bold text-white">{o.shopName}</div>
-                                                <div className="text-xs text-slate-400">{o.qty}x {o.item}</div>
-                                                <div className="text-[10px] text-emerald-500 mt-1 font-mono uppercase">{o.zone}</div>
+                                    orders.slice(0, 10).map(o => (
+                                        <div key={o.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center hover:bg-slate-700/50 transition-colors">
+                                            <div className="flex-1 min-w-0">
+                                                <div className="font-bold text-white truncate">{o.shopName}</div>
+                                                <div className="text-xs text-slate-400 truncate">{o.qty}x {o.item}</div>
+                                                <div className="text-[10px] text-emerald-500 mt-1 font-mono uppercase flex items-center gap-1">
+                                                    <MapPin size={10} className="text-red-400" />{o.zone}
+                                                </div>
                                             </div>
-                                            <div className="text-right">
+                                            <div className="text-right ml-4 flex-shrink-0">
                                                 <div className="text-sm font-bold text-white">{money(o.value_final)}</div>
-                                                <div className="text-[10px] text-slate-500">{new Date(o.createdAt?.seconds * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</div>
+                                                <div className="text-[10px] text-slate-500">{timeAgo(o.createdAt)}</div>
                                             </div>
                                         </div>
                                     ))
@@ -422,22 +480,39 @@
                         )}
 
                         <div className="text-center pt-8 pb-8">
-                            <button onClick={() => setShowModal(true)} className="text-xs text-slate-600 hover:text-red-400 transition-colors flex items-center justify-center gap-1 mx-auto">
-                                <AlertTriangle size={12}/> Report Failure
+                            <button onClick={() => setShowModal({ title: "Report Failure", message: "Please describe the issue you encountered to report a failure.", isError: false })} className="text-xs text-slate-600 hover:text-red-400 transition-colors flex items-center justify-center gap-1 mx-auto">
+                                <AlertTriangle size={12}/> Report Failure/Log Bug
                             </button>
+                            <p className="text-[8px] text-slate-700 mt-2">App ID: {APP_ID}</p>
                         </div>
 
-                    </main>
+                    </div>
 
-                    {/* MODAL */}
+                    {/* CUSTOM MODAL */}
                     {showModal && (
                         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-[100]">
-                            <div className="bg-slate-800 w-full max-w-xs rounded-2xl p-6 border border-slate-700">
-                                <h3 className="font-bold text-lg text-white mb-2">Report Failure</h3>
-                                <textarea className="w-full bg-slate-900 border-slate-600 text-white rounded-lg p-3 text-sm h-24 mb-4" placeholder="Describe issue..."></textarea>
+                            <div className={`w-full max-w-xs rounded-2xl p-6 border ${showModal.isError ? 'bg-red-900 border-red-700' : 'bg-slate-800 border-slate-700'}`}>
+                                <h3 className={`font-bold text-lg mb-2 flex items-center gap-2 ${showModal.isError ? 'text-red-300' : 'text-white'}`}>
+                                    {showModal.isError ? <AlertTriangle size={20}/> : <Info size={20}/>}
+                                    {showModal.title}
+                                </h3>
+                                <p className="text-sm mb-4 text-slate-300">{showModal.message}</p>
+                                
+                                {!showModal.isError && (
+                                    <textarea 
+                                        className="w-full bg-slate-900 border-slate-600 text-white rounded-lg p-3 text-sm h-24 mb-4" 
+                                        placeholder="Detailed description of issue..."
+                                    ></textarea>
+                                )}
                                 <div className="flex gap-2">
-                                    <button onClick={() => setShowModal(false)} className="flex-1 py-3 text-slate-400 font-bold bg-slate-700 rounded-lg">Cancel</button>
-                                    <button onClick={() => setShowModal(false)} className="flex-1 py-3 text-white font-bold bg-red-600 rounded-lg">Log</button>
+                                    <button onClick={() => setShowModal(false)} className="flex-1 py-3 text-slate-400 font-bold bg-slate-700 rounded-lg flex items-center justify-center gap-1">
+                                        <X size={16}/> Close
+                                    </button>
+                                    {!showModal.isError && (
+                                        <button onClick={() => setShowModal(false)} className="flex-1 py-3 text-white font-bold bg-red-600 rounded-lg flex items-center justify-center gap-1">
+                                            <AlertTriangle size={16}/> Send Log
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         </div>
@@ -451,5 +526,4 @@
     </script>
 </body>
 </html>
-
 
