@@ -8,26 +8,26 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>The New Collective</title>
 
-    <!-- 1. THE ENGINE ROOM (Libraries) -->
+    {/* 1. THE ENGINE ROOM (Libraries) */}
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/lucide-react@latest/dist/umd/lucide-react.js"></script>
 
-    <!-- 2. THE NETWORK (Firebase Module Loader) -->
+    {/* 2. THE NETWORK (Firebase Module Loader) */}
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         window.FB = {
             initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
-            getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc
+            getFirestore, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, doc, deleteDoc
         };
     </script>
 
-    <!-- 3. THE CAMOUFLAGE (PWA Manifest Injection) -->
+    {/* 3. THE CAMOUFLAGE (PWA Manifest Injection) */}
     <script>
         // PWA Manifest setup for better mobile experience
         const manifest = {
@@ -50,7 +50,6 @@
         body { 
             font-family: 'Inter', sans-serif; 
             -webkit-tap-highlight-color: transparent; 
-            /* Ensures smooth background color transition */
             background-color: #0f172a;
         }
         .dark-glass { background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(10px); }
@@ -63,12 +62,13 @@
 </head>
 <body class="bg-slate-900 text-slate-100 min-h-screen pb-safe">
 
-    <!-- THE REACT ROOT -->
+    {/* THE REACT ROOT */}
     <div id="root"></div>
 
-    <!-- THE LOGIC -->
+    {/* THE LOGIC */}
     <script type="text/babel">
         // --- CONFIGURATION ---
+        // Using ternary operators to safely fallback if env vars are undefined
         const DEFAULT_CONFIG = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
         const INITIAL_AUTH_TOKEN = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
@@ -112,12 +112,14 @@
             useEffect(() => {
                 const init = async () => {
                     let attempts = 0;
+                    // Wait for the Firebase module to be loaded via the script tag
                     while (!window.FB && attempts < 20) {
                         await new Promise(r => setTimeout(r, 200));
                         attempts++;
                     }
                     
                     if (!window.FB) {
+                        console.error("Firebase module failed to load.");
                         setSystem(p => ({ ...p, status: 'error', error: 'Network Protocol Failed. Refresh.' }));
                         return;
                     }
@@ -151,8 +153,8 @@
                             }
                         });
                     } catch (e) {
-                        console.error("Firebase Init Error:", e);
-                        setSystem(p => ({ ...p, status: 'error', error: 'Security Handshake Failed.' }));
+                        console.error("Firebase Initialization or Auth Error:", e);
+                        setSystem(p => ({ ...p, status: 'error', error: 'Security Handshake Failed. Check console for details.' }));
                     }
                 };
                 init();
@@ -204,7 +206,9 @@
             const stats = useMemo(() => {
                 const data = JSON.parse(JSON.stringify(TARGETS));
                 Object.keys(data).forEach(k => data[k].current = 0);
-                orders.forEach(o => { if(data[o.item]) data[o.item].current += o.qty; });
+                orders.forEach(o => { 
+                    if(o.item && data[o.item]) data[o.item].current += o.qty; 
+                }); 
                 
                 return Object.entries(data).map(([k, v]) => ({
                     name: k, ...v,
@@ -258,10 +262,41 @@
                 setLoading(false);
             };
 
+            const deleteOrder = async (orderId, userId) => {
+                // Ensure only the user who created the order can delete it
+                if (userId !== system.userId) {
+                    setShowModal({
+                        title: "Permission Denied",
+                        message: "You can only delete orders you personally committed.",
+                        isError: true
+                    });
+                    return;
+                }
+
+                setLoading(true);
+                try {
+                    const FB = window.FB;
+                    const db = system.db;
+                    
+                    const docRef = FB.doc(db, 'artifacts', APP_ID, 'public', 'data', 'collective_orders', orderId);
+                    await FB.deleteDoc(docRef);
+
+                    // No need to manually update state, the onSnapshot listener handles this.
+                } catch (err) {
+                    console.error("Deletion Error:", err);
+                    setShowModal({ 
+                        title: "Deletion Failed", 
+                        message: "Could not remove order: " + err.message,
+                        isError: true
+                    });
+                }
+                setLoading(false);
+            };
+
             // --- FORMATTING ---
             const money = (n) => new Intl.NumberFormat('en-ZA', {style: 'currency', currency: 'ZAR'}).format(n);
             const timeAgo = (timestamp) => {
-                if (!timestamp) return '...';
+                if (!timestamp || !timestamp.seconds) return '...';
                 const now = Date.now();
                 const past = timestamp.seconds * 1000;
                 const diffSeconds = Math.floor((now - past) / 1000);
@@ -288,6 +323,7 @@
                         <AlertTriangle className="w-12 h-12 mx-auto mb-4" />
                         <h2 className="text-xl font-bold mb-2">System Lockout</h2>
                         <p className="text-sm font-mono">{system.error}</p>
+                        <p className="text-xs text-red-400 mt-4">Check your browser's console for debugging details.</p>
                     </div>
                 </div>
             );
@@ -301,7 +337,7 @@
                             <h1 className="text-lg font-black text-white tracking-tight flex items-center gap-2">
                                 <Users className="text-emerald-500" size={20} /> THE NEW COLLECTIVE
                             </h1>
-                            <p className="text-[10px] text-slate-400 font-mono uppercase tracking-widest">Supply Network V3.0</p>
+                            <p className="text-[10px] text-slate-400 font-mono uppercase tracking-widest">Supply Network V3.3</p>
                         </div>
                         <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-2 text-right">
                             <div className="text-[10px] text-slate-400 font-mono flex items-center gap-1">
@@ -344,7 +380,7 @@
                         {/* COMMIT VIEW */}
                         {tab === 'commit' && (
                             <div className="space-y-6 animate-fade-in">
-                                <!-- TARGETS DASHBOARD -->
+                                {/* TARGETS DASHBOARD */}
                                 <div className="space-y-3">
                                     <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><Trophy size={14} className="text-blue-400"/> Collective Targets</h3>
                                     {stats.map(s => (
@@ -366,7 +402,7 @@
                                     ))}
                                 </div>
 
-                                <!-- ORDER FORM -->
+                                {/* ORDER FORM */}
                                 <form onSubmit={commit} className="bg-slate-800 rounded-xl p-5 text-slate-100 shadow-xl border border-slate-700">
                                     <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">Place Order</h3>
                                     <div className="space-y-4">
@@ -469,9 +505,23 @@
                                                     <MapPin size={10} className="text-red-400" />{o.zone}
                                                 </div>
                                             </div>
-                                            <div className="text-right ml-4 flex-shrink-0">
-                                                <div className="text-sm font-bold text-white">{money(o.value_final)}</div>
-                                                <div className="text-[10px] text-slate-500">{timeAgo(o.createdAt)}</div>
+                                            <div className="text-right ml-4 flex-shrink-0 flex items-center gap-3">
+                                                <div>
+                                                    <div className="text-sm font-bold text-white">{money(o.value_final)}</div>
+                                                    <div className="text-[10px] text-slate-500">{timeAgo(o.createdAt)}</div>
+                                                </div>
+                                                
+                                                {/* DELETE BUTTON: Only show if the current user created the order */}
+                                                {o.userId === system.userId && (
+                                                    <button 
+                                                        onClick={() => deleteOrder(o.id, o.userId)}
+                                                        disabled={loading}
+                                                        className="p-2 bg-red-600/20 text-red-400 rounded-full hover:bg-red-600/50 transition-colors disabled:opacity-50"
+                                                        aria-label={`Delete order ${o.shopName}`}
+                                                    >
+                                                        <Trash2 size={16}/>
+                                                    </button>
+                                                )}
                                             </div>
                                         </div>
                                     ))
@@ -498,6 +548,7 @@
                                 </h3>
                                 <p className="text-sm mb-4 text-slate-300">{showModal.message}</p>
                                 
+                                {/* Only show the form if it's not an error message */}
                                 {!showModal.isError && (
                                     <textarea 
                                         className="w-full bg-slate-900 border-slate-600 text-white rounded-lg p-3 text-sm h-24 mb-4" 
@@ -521,9 +572,32 @@
             );
         };
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        // --- GLOBAL ERROR BOUNDARY FOR REACT RENDER ---
+        try {
+            const root = ReactDOM.createRoot(document.getElementById('root'));
+            root.render(<App />);
+        } catch (e) {
+            console.error("Critical React Render Error:", e);
+            // Fallback UI for catastrophic failure
+            const rootDiv = document.getElementById('root');
+            if(rootDiv) {
+                rootDiv.innerHTML = `
+                    <div class="fixed inset-0 flex items-center justify-center bg-red-950 text-red-200 p-8 text-center">
+                        <div>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mx-auto mb-4"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                            <h2 class="text-xl font-bold mb-2">Critical Application Error (V3.3)</h2>
+                            <p class="text-sm font-mono">Failed to initialize the user interface.</p>
+                            <p class="text-xs text-red-400 mt-4">Please check the console for '${e.message}' and ensure all files are committed.</p>
+                        </div>
+                    </div>
+                `;
+            }
+        }
     </script>
 </body>
 </html>
+```eof
 
+**Next Step:** Please **commit this final code** to your GitHub repository with the message `Fix: JSX comment compliance (V3.3)`, then hard refresh your live application link:
+
+> `https://vantoekaaf23-cmyk.github.io/spaza-collective-pwa/`
